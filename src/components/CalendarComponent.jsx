@@ -1,9 +1,6 @@
 import React, { useState, useMemo } from 'react';
-import {
-  DragDropContext,
-  Droppable,
-  Draggable
-} from 'react-beautiful-dnd';
+import { useDrag, useDrop, DndProvider } from 'react-dnd';
+import { HTML5Backend } from 'react-dnd-html5-backend';
 import {
   format,
   startOfMonth,
@@ -15,226 +12,248 @@ import {
   subMonths,
   getDay,
   differenceInDays,
-  parseISO
+  parseISO,
+  startOfDay
 } from 'date-fns';
 
-const isEventOnDay = (event, day) => {
-  let startDate = event.start;
-  let endDate = event.end;
-
-  if (!(startDate instanceof Date)) {
-    try {
-      startDate = parseISO(startDate);
-    } catch {
-      return false;
-    }
-  }
-
-  if (!(endDate instanceof Date)) {
-    try {
-      endDate = parseISO(endDate);
-    } catch {
-      return false;
-    }
-  }
-
-  return isSameDay(day, startDate) || (startDate <= day && endDate >= day);
+const ItemTypes = {
+  EVENT: 'event'
 };
 
-const CalendarComponent = ({
-  currentDate,
-  events,
-  onDateChange,
-  onSelectDate,
-  onSelectEvent,
-  onUpdateEvent
-}) => {
-  // Removed isDragging and localEvents state for simplicity
+const isEventOnDay = (event, day) => {
+  let startDate = event.start instanceof Date ? event.start : parseISO(event.start);
+  let endDate = event.end instanceof Date ? event.end : parseISO(event.end);
+
+  return (
+    isSameDay(day, startDate) ||
+    (startDate <= day && endDate >= day)
+  );
+};
+
+const DraggableEvent = ({ event, onSelectEvent }) => {
+  const [{ isDragging }, dragRef] = useDrag({
+    type: ItemTypes.EVENT,
+    item: { id: event.id, start: event.start, end: event.end },
+    collect: monitor => ({
+      isDragging: monitor.isDragging()
+    })
+  });
+
+  return (
+    <div
+      ref={dragRef}
+      onClick={(e) => {
+        e.stopPropagation();
+        onSelectEvent?.(event);
+      }}
+      style={{
+        backgroundColor: event.color || '#007bff',
+        color: '#fff',
+        borderRadius: 4,
+        padding: '4px 8px',
+        fontSize: 12,
+        marginBottom: 4,
+        opacity: isDragging ? 0.5 : 1,
+        cursor: 'grab',
+        pointerEvents: isDragging ? 'none' : 'auto',
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis'
+      }}
+      title={event.title}
+    >
+      {event.title}
+    </div>
+  );
+};
+
+const DroppableDay = ({ day, events, onDropEvent, isToday, isCurrentMonth, onSelectDate, onSelectEvent }) => {
+  const [{ isOver }, dropRef] = useDrop({
+    accept: ItemTypes.EVENT,
+    drop: (item) => {
+      if (onDropEvent) onDropEvent(item, day);
+    },
+    collect: monitor => ({
+      isOver: monitor.isOver()
+    })
+  });
+
+  return (
+    <div
+      ref={dropRef}
+      onClick={() => onSelectDate?.(day)}
+      style={{
+        border: '1px solid #ddd',
+        minHeight: 80,
+        backgroundColor: isOver ? '#f1f8e9' : isToday ? '#e1f5fe' : '#fff',
+        color: isCurrentMonth ? '#000' : '#aaa',
+        display: 'flex',
+        flexDirection: 'column',
+        padding: 6,
+        boxSizing: 'border-box',
+        borderRadius: 4,
+        transition: 'background-color 0.2s ease'
+      }}
+    >
+      <div style={{ fontWeight: 'bold', fontSize: 12, marginBottom: 6 }}>{format(day, 'd')}</div>
+      <div style={{ flexGrow: 1, overflow: 'hidden' }}>
+        {events.map(event => (
+          <DraggableEvent key={event.id} event={event} onSelectEvent={onSelectEvent} />
+        ))}
+      </div>
+    </div>
+  );
+};
+
+const CalendarComponent = ({ currentDate, events, onDateChange, onSelectDate, onSelectEvent, onUpdateEvent }) => {
   const [searchQuery, setSearchQuery] = useState('');
 
   const filteredEvents = useMemo(() => {
-    if (!searchQuery.trim()) return events;
+    const query = searchQuery.trim().toLowerCase();
+    if (!query) return events;
 
-    const lowerQuery = searchQuery.toLowerCase();
     return events.filter(ev =>
-      (ev.title && ev.title.toLowerCase().includes(lowerQuery)) ||
-      (ev.description && ev.description.toLowerCase().includes(lowerQuery))
+      ev.title?.toLowerCase().includes(query) ||
+      ev.description?.toLowerCase().includes(query)
     );
   }, [searchQuery, events]);
 
   const monthStart = startOfMonth(currentDate);
   const monthEnd = endOfMonth(currentDate);
   const daysInMonth = eachDayOfInterval({ start: monthStart, end: monthEnd });
-  const startWeekday = getDay(monthStart);
+  const startOffset = getDay(monthStart);
   const totalCells = 42;
 
-  const emptyStart = Array(startWeekday).fill(null);
-  const emptyEnd = Array(totalCells - daysInMonth.length - startWeekday).fill(null);
+  const emptyStart = Array(startOffset).fill(null);
+  const emptyEnd = Array(totalCells - daysInMonth.length - startOffset).fill(null);
   const calendarDays = [...emptyStart, ...daysInMonth, ...emptyEnd];
 
-  const getDateKey = (date) => format(date, 'yyyy-MM-dd');
+  const getDateKey = date => format(date, 'yyyy-MM-dd');
 
   const eventsByDate = useMemo(() => {
     const map = {};
     calendarDays.forEach(day => {
       if (!day) return;
-      const dateKey = getDateKey(day);
-      map[dateKey] = filteredEvents.filter(ev => isEventOnDay(ev, day));
+      const key = getDateKey(day);
+      map[key] = filteredEvents.filter(ev => isEventOnDay(ev, day));
     });
     return map;
-  }, [filteredEvents, calendarDays]);
+  }, [calendarDays, filteredEvents]);
 
-  const handleDragEnd = (result) => {
-    const { source, destination, draggableId } = result;
-    if (!destination) return;
-    if (source.droppableId === destination.droppableId &&
-        source.index === destination.index) return;
+  const handleDropEvent = (draggedItem, dropDay) => {
+    if (!draggedItem || !dropDay) return;
 
-    const event = events.find(ev => String(ev.id) === draggableId);
-    if (!event) return;
+    const draggedEvent = events.find(ev => ev.id === draggedItem.id);
+    if (!draggedEvent) return;
 
-    const sourceDate = parseISO(source.droppableId);
-    const destinationDate = parseISO(destination.droppableId);
-    const dayDiff = differenceInDays(destinationDate, sourceDate);
-    if (dayDiff === 0) return;
+    const originalStart = draggedEvent.start instanceof Date ? draggedEvent.start : parseISO(draggedEvent.start);
+    const originalEnd = draggedEvent.end instanceof Date ? draggedEvent.end : parseISO(draggedEvent.end);
 
-    const newStart = new Date(event.start);
+    // Normalize to start of day for accurate day diff calculation
+    const originalStartDay = startOfDay(originalStart);
+    const dropDayStart = startOfDay(dropDay);
+
+    const dayDiff = differenceInDays(dropDayStart, originalStartDay);
+
+    const newStart = new Date(originalStart);
     newStart.setDate(newStart.getDate() + dayDiff);
-    const newEnd = new Date(event.end);
+
+    const newEnd = new Date(originalEnd);
     newEnd.setDate(newEnd.getDate() + dayDiff);
 
+    // Check for conflicts (excluding the dragged event itself)
+    const hasConflict = events.some(ev => {
+      if (ev.id === draggedEvent.id) return false;
+
+      const evStart = ev.start instanceof Date ? ev.start : parseISO(ev.start);
+      const evEnd = ev.end instanceof Date ? ev.end : parseISO(ev.end);
+
+      // Overlapping condition
+      return (newStart < evEnd && newEnd > evStart);
+    });
+
+    if (hasConflict) {
+      alert('Event conflicts with an existing event on this day.');
+      return;
+    }
+
     const updatedEvent = {
-      ...event,
+      ...draggedEvent,
       start: newStart.toISOString(),
-      end: newEnd.toISOString()
+      end: newEnd.toISOString(),
     };
 
-    if (onUpdateEvent) onUpdateEvent(updatedEvent);
+    onUpdateEvent?.(updatedEvent);
   };
 
   return (
-    <div style={{ width: '100%', maxWidth: 900, margin: '0 auto', fontFamily: 'Arial, sans-serif' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-        <button onClick={() => onDateChange(subMonths(currentDate, 1))}>&lt; Prev</button>
-        <h2 style={{ margin: 0 }}>{format(currentDate, 'MMMM yyyy')}</h2>
-        <button onClick={() => onDateChange(addMonths(currentDate, 1))}>Next &gt;</button>
-      </div>
+    <DndProvider backend={HTML5Backend}>
+      <div style={{ width: '100%', maxWidth: 960, margin: '0 auto', fontFamily: 'Arial, sans-serif' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+          <button onClick={() => onDateChange(subMonths(currentDate, 1))}>&lt; Prev</button>
+          <h2>{format(currentDate, 'MMMM yyyy')}</h2>
+          <button onClick={() => onDateChange(addMonths(currentDate, 1))}>Next &gt;</button>
+        </div>
 
-      <div style={{ marginBottom: 12, textAlign: 'center' }}>
-        <input
-          type="text"
-          placeholder="Search events by title or description..."
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          style={{
-            width: '100%',
-            maxWidth: 400,
-            padding: 8,
-            fontSize: 14,
-            borderRadius: 4,
-            border: '1px solid #ccc',
-            boxSizing: 'border-box'
-          }}
-        />
-      </div>
+        <div style={{ marginBottom: 16, textAlign: 'center' }}>
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search events..."
+            style={{
+              width: '100%',
+              maxWidth: 400,
+              padding: 8,
+              border: '1px solid #ccc',
+              borderRadius: 6,
+              fontSize: 14
+            }}
+          />
+        </div>
 
-      <DragDropContext onDragEnd={handleDragEnd}>
         <div
           style={{
             display: 'grid',
             gridTemplateColumns: 'repeat(7, 1fr)',
-            gap: 4,
-            userSelect: 'none',
+            gap: 6
           }}
         >
-          {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(day => (
+          {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((label) => (
             <div
-              key={day}
-              style={{ textAlign: 'center', fontWeight: 'bold', padding: 6, borderBottom: '2px solid #ccc' }}
+              key={label}
+              style={{ textAlign: 'center', fontWeight: 'bold', fontSize: 14, paddingBottom: 4 }}
             >
-              {day}
+              {label}
             </div>
           ))}
 
           {calendarDays.map((day, idx) => {
             if (!day) {
-              return (
-                <div
-                  key={`empty-${idx}`}
-                  style={{ border: '1px solid #f0f0f0', minHeight: 80, backgroundColor: '#fafafa' }}
-                />
-              );
+              return <div key={`empty-${idx}`} style={{ minHeight: 80 }} />;
             }
 
-            const isCurrentMonth = isSameMonth(day, currentDate);
+            const key = getDateKey(day);
             const isToday = isSameDay(day, new Date());
-            const dateKey = getDateKey(day);
-            const eventsForDay = eventsByDate[dateKey] || [];
+            const isCurrentMonth = isSameMonth(day, currentDate);
+            const dayEvents = eventsByDate[key] || [];
 
             return (
-              <div
-                key={dateKey}
-                style={{
-                  border: '1px solid #ddd',
-                  minHeight: 80,
-                  backgroundColor: isToday ? '#e0f7fa' : 'white',
-                  color: isCurrentMonth ? 'inherit' : '#bbb',
-                  cursor: 'pointer',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  padding: 4,
-                  boxSizing: 'border-box',
-                }}
-                onClick={() => onSelectDate && onSelectDate(day)}
-              >
-                <div style={{ fontWeight: 'bold', marginBottom: 4 }}>{format(day, 'd')}</div>
-
-                <Droppable droppableId={dateKey} type="EVENTS">
-                  {(provided) => (
-                    <div
-                      ref={provided.innerRef}
-                      {...provided.droppableProps}
-                      style={{ flexGrow: 1, overflowY: 'auto' }}
-                    >
-                      {eventsForDay.map((event, index) => (
-                        <Draggable key={String(event.id)} draggableId={String(event.id)} index={index}>
-                          {(provided, snapshot) => (
-                            <div
-                              ref={provided.innerRef}
-                              {...provided.draggableProps}
-                              {...provided.dragHandleProps}
-                              onClick={e => {
-                                e.stopPropagation();
-                                onSelectEvent && onSelectEvent(event);
-                              }}
-                              style={{
-                                backgroundColor: event.color || '#007bff',
-                                color: 'white',
-                                borderRadius: 4,
-                                padding: '2px 6px',
-                                marginBottom: 4,
-                                fontSize: 12,
-                                boxShadow: snapshot.isDragging ? '0 0 8px rgba(0,0,0,0.3)' : 'none',
-                                userSelect: 'none',
-                                ...provided.draggableProps.style
-                              }}
-                              title={event.title}
-                            >
-                              {event.title.length > 15 ? event.title.slice(0, 12) + '...' : event.title}
-                            </div>
-                          )}
-                        </Draggable>
-                      ))}
-                      {provided.placeholder}
-                    </div>
-                  )}
-                </Droppable>
-              </div>
+              <DroppableDay
+                key={key}
+                day={day}
+                events={dayEvents}
+                isToday={isToday}
+                isCurrentMonth={isCurrentMonth}
+                onDropEvent={handleDropEvent}
+                onSelectDate={onSelectDate}
+                onSelectEvent={onSelectEvent}
+              />
             );
           })}
         </div>
-      </DragDropContext>
-    </div>
+      </div>
+    </DndProvider>
   );
 };
 
